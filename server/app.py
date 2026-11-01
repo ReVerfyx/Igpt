@@ -2,10 +2,12 @@
 iOS 5 communicates with this service, never directly with OpenAI or YouTube.
 """
 import asyncio
+import errno
 import hashlib
 import hmac
 import ipaddress
 import os
+import pty
 import secrets
 import shutil
 import socket
@@ -30,6 +32,8 @@ if len(TOKEN) < 32:
     raise RuntimeError("Set IGPT_TOKEN to a random 32+ character secret.")
 os.makedirs(WORKDIR, exist_ok=True)
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+terminal_sessions = {}
+TERMINAL_LIMIT = 3
 
 
 class Payload(BaseModel):
@@ -40,6 +44,82 @@ class Payload(BaseModel):
     y: int = 0
     delta: int = 0
     id: str = ""
+
+
+def close_terminal(session_id):
+    session = terminal_sessions.pop(session_id, None)
+    if not session:
+        return
+    try:
+        os.close(session["fd"])
+    except OSError:
+        pass
+    try:
+        os.kill(session["pid"], 15)
+    except OSError:
+        pass
+
+
+@app.post("/terminal/open")
+async def terminal_open():
+    """Create an unprivileged interactive PTY; no SSH/root credential exists here."""
+    if len(terminal_sessions) >= TERMINAL_LIMIT:
+        raise HTTPException(429, "Terminal session limit reached")
+    # forkpty makes the shell's slave its controlling terminal; merely wiring
+    # pipes to a pseudo-terminal makes interactive programs exit on SIGHUP.
+    pid, master = pty.fork()
+    if pid == 0:  # pragma: no cover - replaced by exec in the child
+        os.chdir(WORKDIR)
+        os.execvpe("/bin/bash", ["/bin/bash", "--noprofile", "--norc"],
+                   {**os.environ, "TERM": "xterm", "HISTFILE": "/dev/null"})
+    os.set_blocking(master, False)
+    session_id = secrets.token_urlsafe(24)
+    terminal_sessions[session_id] = {"fd": master, "pid": pid, "last": time.monotonic()}
+    return {"id": session_id}
+
+
+@app.post("/terminal/write")
+async def terminal_write(p: Payload):
+    session = terminal_sessions.get(p.id)
+    if not session:
+        raise HTTPException(404, "Terminal session not found")
+    raw = p.text.encode("utf-8", "replace")[:8192]
+    try:
+        os.write(session["fd"], raw)
+    except OSError:
+        close_terminal(p.id)
+        raise HTTPException(410, "Terminal session closed")
+    session["last"] = time.monotonic()
+    return {"ok": True}
+
+
+@app.post("/terminal/read")
+async def terminal_read(p: Payload):
+    session = terminal_sessions.get(p.id)
+    if not session:
+        raise HTTPException(404, "Terminal session not found")
+    chunks = []
+    remaining = 16384
+    while remaining:
+        try:
+            chunk = os.read(session["fd"], min(4096, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        except OSError as exc:
+            if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                break
+            close_terminal(p.id)
+            raise HTTPException(410, "Terminal session closed")
+    session["last"] = time.monotonic()
+    return {"text": b"".join(chunks).decode("utf-8", "replace")}
+
+
+@app.post("/terminal/close")
+async def terminal_close(p: Payload):
+    close_terminal(p.id)
+    return {"ok": True}
 
 
 @app.middleware("http")
@@ -198,4 +278,6 @@ app.include_router(remote_router)
 
 @app.on_event("shutdown")
 async def shutdown_remote():
+    for session_id in list(terminal_sessions):
+        close_terminal(session_id)
     await close_remote()

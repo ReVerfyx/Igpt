@@ -1,0 +1,9 @@
+Package: com.reverfyx.igpt
+Name: iGPT
+Version: 0.1.0
+Architecture: iphoneos-arm
+Description: Lightweight ChatGPT, Codex, VPS terminal and remote browser for iPad 1.
+Maintainer: ReVerfyx Studio
+Author: ReVerfyx Studio
+Section: Applications
+Depends: firmware (>= 5.0)

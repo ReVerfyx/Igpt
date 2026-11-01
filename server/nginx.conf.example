@@ -1,0 +1,13 @@
+# Add to an existing HTTPS server { } block with a real DNS name and
+# a valid iOS-5-compatible certificate. Do not expose port 8765 publicly.
+location /igpt/ {
+    # Proxy without prefix (use a dedicated igpt.your-domain example
+    # instead if unsure about path rewriting and video URLs).
+    rewrite ^/igpt/(.*)$ /$1 break;
+    proxy_pass http://127.0.0.1:8765;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_read_timeout 220s;
+    proxy_buffering off;
+}

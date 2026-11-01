@@ -17,11 +17,13 @@ from urllib.parse import urlsplit
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 TOKEN = os.environ.get("IGPT_TOKEN", "")
 WORKDIR = os.environ.get("IGPT_WORKDIR", "/var/lib/igpt/workspace")
+VIDEO_CACHE = os.environ.get("IGPT_VIDEO_CACHE", "/var/lib/igpt/video-cache")
+VIDEO_CACHE_LIMIT = int(os.environ.get("IGPT_VIDEO_CACHE_LIMIT", str(800 * 1024 * 1024)))
 PUBLIC_URL = os.environ.get("IGPT_PUBLIC_URL", "").rstrip("/")
 # Comma separated, self-hosted instances are preferred.  A single public
 # instance is deliberately not a mandatory dependency.
@@ -31,6 +33,7 @@ INVIDIOUS_INSTANCES = [x.rstrip("/") for x in os.environ.get(
 if len(TOKEN) < 32:
     raise RuntimeError("Set IGPT_TOKEN to a random 32+ character secret.")
 os.makedirs(WORKDIR, exist_ok=True)
+os.makedirs(VIDEO_CACHE, exist_ok=True)
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 terminal_sessions = {}
 TERMINAL_LIMIT = 3
@@ -230,6 +233,49 @@ async def stream_info(video_id, quality="360p"):
     raise HTTPException(404, "No compatible MP4 stream from configured backends")
 
 
+def cache_path(video_id, quality):
+    # video_id and quality are validated before this point; retain a fixed name.
+    return os.path.join(VIDEO_CACHE, video_id + "-" + quality + ".mp4")
+
+
+async def cache_video(video_id, quality):
+    """Download once to the VPS. iPad then seeks a local H.264/AAC MP4."""
+    path = cache_path(video_id, quality)
+    if os.path.isfile(path) and os.path.getsize(path) > 1024:
+        return path
+    source = await stream_info(video_id, quality)
+    await asyncio.to_thread(validate_url, source)
+    temporary = path + ".part"
+    total = 0
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30, read=180), follow_redirects=True) as client:
+            async with client.stream("GET", source) as response:
+                response.raise_for_status()
+                length = int(response.headers.get("content-length", "0") or 0)
+                if length and length > VIDEO_CACHE_LIMIT:
+                    raise HTTPException(413, "Video exceeds VPS cache limit")
+                with open(temporary, "wb") as output:
+                    async for chunk in response.aiter_bytes(65536):
+                        total += len(chunk)
+                        if total > VIDEO_CACHE_LIMIT:
+                            raise HTTPException(413, "Video exceeds VPS cache limit")
+                        output.write(chunk)
+        os.replace(temporary, path)
+        return path
+    except HTTPException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+    except (OSError, httpx.HTTPError) as exc:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise HTTPException(502, "Video download failed: " + str(exc)[:160])
+
+
 def video_signature(video_id, quality, exp):
     return hmac.new(TOKEN.encode(), (video_id + ":" + quality + ":" + str(exp)).encode(),
                     hashlib.sha256).hexdigest()
@@ -240,7 +286,7 @@ async def video_url(p: Payload):
     if not PUBLIC_URL.startswith("https://"):
         raise HTTPException(503, "Set IGPT_PUBLIC_URL to your HTTPS domain")
     quality = p.quality if p.quality in ("144p", "240p", "360p", "480p") else "360p"
-    await stream_info(p.id, quality)
+    await cache_video(p.id, quality)
     exp = int(time.time()) + 900
     return {"url": PUBLIC_URL + "/video/stream/" + p.id + "?exp=" +
                    str(exp) + "&quality=" + quality + "&sig=" + video_signature(p.id, quality, exp)}
@@ -253,6 +299,10 @@ async def video_stream(video_id: str, request: Request, exp: int = 0, quality: s
         sig, video_signature(video_id, quality, exp)
     ):
         raise HTTPException(401, "Expired stream link")
+    cached = cache_path(video_id, quality)
+    if os.path.isfile(cached) and os.path.getsize(cached) > 1024:
+        # Starlette FileResponse handles RFC 7233 Range requests for seeking.
+        return FileResponse(cached, media_type="video/mp4", filename=video_id + ".mp4")
     url = await stream_info(video_id, quality)
     client = httpx.AsyncClient(timeout=httpx.Timeout(30, read=90), follow_redirects=True)
     range_value = request.headers.get("range", "")

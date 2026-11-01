@@ -8,12 +8,13 @@ ROOT=/opt/igpt
 install -d -m 0755 "$ROOT"
 install -d -m 0700 /var/lib/igpt
 id -u igpt >/dev/null 2>&1 || useradd --system --home /var/lib/igpt --shell /usr/sbin/nologin igpt
+chown -R igpt:igpt /var/lib/igpt
 apt-get update
 apt-get install -y python3-venv python3-pip ffmpeg chromium-browser nginx
 python3 -m venv "$ROOT/venv"
 "$ROOT/venv/bin/pip" install --upgrade pip
 "$ROOT/venv/bin/pip" install -r "$ROOT/server/requirements.txt"
-su -s /bin/sh igpt -c "$ROOT/venv/bin/playwright install chromium"
+su -s /bin/sh igpt -c "HOME=/var/lib/igpt $ROOT/venv/bin/playwright install chromium"
 install -m 0600 /dev/stdin /etc/igpt.env <<EOF
 IGPT_TOKEN=$IGPT_TOKEN
 IGPT_PROFILE_DIR=/var/lib/igpt/profiles

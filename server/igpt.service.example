@@ -17,6 +17,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ReadWritePaths=/var/lib/igpt
+Environment=IGPT_VIDEO_CACHE=/var/lib/igpt/video-cache
 UMask=0077
 
 [Install]

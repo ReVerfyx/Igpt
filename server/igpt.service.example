@@ -1,0 +1,23 @@
+[Unit]
+Description=iGPT iPad 1 bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=igpt
+Group=igpt
+WorkingDirectory=/opt/igpt/server
+EnvironmentFile=/etc/igpt.env
+Environment=HOME=/var/lib/igpt
+ExecStart=/opt/igpt/venv/bin/uvicorn app:app --host 127.0.0.1 --port 8765 --workers 1
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/igpt
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -41,7 +41,7 @@ jobs:
           deb="$(find client/packages -name '*.deb' -print -quit)"
           dpkg-deb --info "$deb"
           dpkg-deb --contents "$deb"
-          dpkg-deb --contents "$deb" | grep -F '/Applications/Igpt.app/Igpt$'
+          dpkg-deb --contents "$deb" | grep -F 'Applications/Igpt.app/Igpt'
           work="$RUNNER_TEMP/igpt-deb"
           dpkg-deb -x "$deb" "$work"
           file "$work/Applications/Igpt.app/Igpt" | tee /tmp/igpt-file.txt

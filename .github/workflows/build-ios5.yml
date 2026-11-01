@@ -46,6 +46,7 @@ jobs:
           dpkg-deb -x "$deb" "$work"
           file "$work/Applications/Igpt.app/Igpt" | tee /tmp/igpt-file.txt
           grep -Eqi 'armv7|arm' /tmp/igpt-file.txt
+          "$THEOS/toolchain/linux/iphone/bin/llvm-objdump" --macho --private-headers "$work/Applications/Igpt.app/Igpt" | grep -A3 LC_VERSION_MIN_IPHONEOS | grep -F 'version 5.0'
       - name: Upload downloadable DEB
         uses: actions/upload-artifact@v4
         with:

@@ -13,6 +13,6 @@ Igpt_CFLAGS = -fno-objc-arc -fblocks
 # Recent Linux Theos SDK mirrors omit objc_msgSend_stret from their .tbd even
 # though it is exported by the iOS 5 armv7 Objective-C runtime. Resolve it at
 # load time instead of falsely requiring a simulator-only stub at link time.
-Igpt_LDFLAGS = -undefined dynamic_lookup
+Igpt_LDFLAGS = -undefined dynamic_lookup -Wl,-iphoneos_version_min,5.0
 
 include $(THEOS_MAKE_PATH)/application.mk

@@ -44,6 +44,7 @@ class Payload(BaseModel):
     y: int = 0
     delta: int = 0
     id: str = ""
+    quality: str = "360p"
 
 
 def close_terminal(session_id):
@@ -205,7 +206,7 @@ async def video_search(p: Payload):
     raise HTTPException(502, "No configured video backend is available")
 
 
-async def stream_info(video_id):
+async def stream_info(video_id, quality="360p"):
     if len(video_id) != 11 or not all(c.isalnum() or c in "-_" for c in video_id):
         raise HTTPException(400, "Bad video id")
     async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
@@ -219,15 +220,18 @@ async def stream_info(video_id):
                 # is still proxied through this service; conversion is handled
                 # by a local source deployment when no compatible stream exists.
                 if candidates:
-                    return next((s["url"] for s in candidates if "360" in s.get("qualityLabel", "")),
-                                candidates[0]["url"])
+                    requested = quality if quality in ("144p", "240p", "360p", "480p") else "360p"
+                    return next((s["url"] for s in candidates
+                                 if requested in s.get("qualityLabel", "")),
+                                next((s["url"] for s in candidates
+                                      if "360" in s.get("qualityLabel", "")), candidates[0]["url"]))
             except (httpx.HTTPError, ValueError, KeyError):
                 continue
     raise HTTPException(404, "No compatible MP4 stream from configured backends")
 
 
-def video_signature(video_id, exp):
-    return hmac.new(TOKEN.encode(), (video_id + ":" + str(exp)).encode(),
+def video_signature(video_id, quality, exp):
+    return hmac.new(TOKEN.encode(), (video_id + ":" + quality + ":" + str(exp)).encode(),
                     hashlib.sha256).hexdigest()
 
 
@@ -235,20 +239,21 @@ def video_signature(video_id, exp):
 async def video_url(p: Payload):
     if not PUBLIC_URL.startswith("https://"):
         raise HTTPException(503, "Set IGPT_PUBLIC_URL to your HTTPS domain")
-    await stream_info(p.id)
+    quality = p.quality if p.quality in ("144p", "240p", "360p", "480p") else "360p"
+    await stream_info(p.id, quality)
     exp = int(time.time()) + 900
     return {"url": PUBLIC_URL + "/video/stream/" + p.id + "?exp=" +
-                   str(exp) + "&sig=" + video_signature(p.id, exp)}
+                   str(exp) + "&quality=" + quality + "&sig=" + video_signature(p.id, quality, exp)}
 
 
 @app.get("/video/stream/{video_id}")
-async def video_stream(video_id: str, request: Request, exp: int = 0, sig: str = ""):
+async def video_stream(video_id: str, request: Request, exp: int = 0, quality: str = "360p", sig: str = ""):
     # The player cannot set custom headers, so require a short-lived signed URL.
     if exp < time.time() or exp > time.time() + 1000 or not hmac.compare_digest(
-        sig, video_signature(video_id, exp)
+        sig, video_signature(video_id, quality, exp)
     ):
         raise HTTPException(401, "Expired stream link")
-    url = await stream_info(video_id)
+    url = await stream_info(video_id, quality)
     client = httpx.AsyncClient(timeout=httpx.Timeout(30, read=90), follow_redirects=True)
     range_value = request.headers.get("range", "")
     upstream = await client.send(

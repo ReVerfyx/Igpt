@@ -45,7 +45,8 @@ class Payload(BaseModel):
 
 @app.middleware("http")
 async def check_auth(req: Request, next_call):
-    if req.url.path == "/health":
+    if req.url.path == "/health" or req.url.path.startswith("/video/stream/"):
+        # /video/stream has its own short-lived HMAC signature validation.
         return await next_call(req)
     got = req.headers.get("x-igpt-token", "")
     if not hmac.compare_digest(got, TOKEN):
@@ -153,7 +154,7 @@ async def ensure_browser():
             from playwright.async_api import async_playwright
             pw = await async_playwright().start()
             browser = await pw.chromium.launch(headless=True,
-                                                args=["--no-sandbox"])
+                                                args=[])
             page = await browser.new_page(viewport={"width": 1024, "height": 640},
                                           device_scale_factor=1)
         except Exception as e:
@@ -275,3 +276,8 @@ async def video_stream(video_id: str, request: Request, exp: int = 0, sig: str =
             await client.aclose()
     return StreamingResponse(body(), status_code=upstream.status_code,
                              headers=headers, media_type="video/mp4")
+
+
+# iOS 5 remote display sessions (separate persistent ChatGPT and browser profiles).
+from remote import router as remote_router
+app.include_router(remote_router)

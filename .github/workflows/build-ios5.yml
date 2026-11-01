@@ -1,30 +1,53 @@
-name: Build iOS 5 armv7 Cydia package
+name: Build and Release iGPT iOS 5 DEB
 on:
   push:
     branches: [main]
+    paths:
+      - 'client/**'
+      - '.github/workflows/build-ios5.yml'
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
-  build:
+  build-and-release:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - name: Prerequisites
-        run: sudo apt-get update && sudo apt-get install -y make git curl xz-utils dpkg-dev fakeroot
-      - name: Install Theos and Linux cross compiler
+      - name: Install prerequisites
+        run: sudo apt-get update && sudo apt-get install -y build-essential git curl xz-utils dpkg-dev fakeroot rsync perl libtinfo6 libxml2
+      - name: Install Theos, iOS toolchain, iOS 9.3 SDK
         shell: bash
         run: |
           set -euxo pipefail
-          git clone --depth=1 --recursive https://github.com/theos/theos.git "$RUNNER_TEMP/theos"
-          mkdir -p "$RUNNER_TEMP/theos/toolchain"
-          curl -fLsS https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-x86_64.tar.xz | tar -xJ -C "$RUNNER_TEMP/theos/toolchain"
+          export THEOS="$RUNNER_TEMP/theos"
+          git clone --depth=1 --recursive https://github.com/theos/theos.git "$THEOS"
+          mkdir -p "$THEOS/toolchain" "$THEOS/sdks"
+          curl --fail --location --retry 3 --silent --show-error https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-x86_64.tar.xz | tar -xJ -C "$THEOS/toolchain"
+          test -x "$THEOS/toolchain/linux/iphone/bin/clang"
           git clone --depth=1 https://github.com/theos/sdks.git "$RUNNER_TEMP/sdks"
-          cp -a "$RUNNER_TEMP/sdks/iPhoneOS9.3.sdk" "$RUNNER_TEMP/theos/sdks/"
-          echo "THEOS=$RUNNER_TEMP/theos" >> "$GITHUB_ENV"
-      - name: Build .deb
-        run: make -C client clean package FINALPACKAGE=1
-      - name: Upload .deb
+          cp -a "$RUNNER_TEMP/sdks/iPhoneOS9.3.sdk" "$THEOS/sdks/"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+      - name: Build armv7 rootful .deb
+        run: |
+          set -euxo pipefail
+          make -C client clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootful
+          ls -lah client/packages/
+          test "$(find client/packages -name '*.deb' | wc -l)" -gt 0
+      - name: Upload downloadable DEB
         uses: actions/upload-artifact@v4
         with:
-          name: iGPT-iOS5-armv7
+          name: iGPT-iPad1-iOS5.1.1
           path: client/packages/*.deb
           if-no-files-found: error
+      - name: Publish prerelease only after successful build
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.0-ios5-preview
+          name: iGPT iPad 1 iOS 5.1.1 preview
+          prerelease: true
+          make_latest: false
+          body: |
+            PREVIEW ONLY. Compiled package is intended for jailbroken iPad 1 on iOS 5.1.1.
+            The VPS bridge must be deployed separately. ChatGPT account login and video playback have not been validated on a physical device.
+            Never enter your SSH/root password into iGPT. Use a separately generated bridge token.
+          files: client/packages/*.deb

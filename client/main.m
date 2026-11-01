@@ -108,18 +108,25 @@
 }
 - (void)changeTab {
     NSInteger t = self.tabs.selectedSegmentIndex;
-    self.output.hidden = (t >= 3);
-    self.screen.hidden = (t != 3);
+    self.output.hidden = (t == 0 || t >= 3);
+    self.screen.hidden = (t != 0 && t != 3);
     self.videos.hidden = (t != 4);
     self.address.hidden = (t != 3);
-    self.backButton.hidden = self.upButton.hidden = self.downButton.hidden = self.enterButton.hidden = (t != 3);
+    self.backButton.hidden = self.upButton.hidden = self.downButton.hidden = self.enterButton.hidden = (t != 0 && t != 3);
     self.input.text = @"";
     self.sendButton.titleLabel.textAlignment = UITextAlignmentCenter;
     [self.sendButton setTitle:(t == 3 ? @"Open" : t == 4 ? @"Search" : @"Send") forState:UIControlStateNormal];
-    if (t == 0) self.output.text = @"ChatGPT · via OpenAI API on VPS\n";
+    if (t == 0) self.output.text = @"ChatGPT account · remote login\n";
     if (t == 1) self.output.text = @"Codex · run prompts on VPS workspace\n";
     if (t == 2) self.output.text = @"VPS terminal · unprivileged user\n";
     [self.view setNeedsLayout];
+    if ((t == 0 || t == 3) && [self.token length]) {
+        [self api:@"/remote/open" data:[NSDictionary dictionaryWithObject:(t == 0 ? @"chatgpt" : @"browser") forKey:@"mode"]
+             done:^(NSDictionary *j, NSError *e) {
+                 if (e) [self append:[e localizedDescription]];
+                 else [self refreshScreen];
+             }];
+    }
 }
 - (void)settings {
     UIAlertView *a = [[[UIAlertView alloc] initWithTitle:@"iGPT connection"
@@ -144,6 +151,7 @@
     self.token = key;
     [[NSUserDefaults standardUserDefaults] setObject:self.base forKey:@"base"];
     [[NSUserDefaults standardUserDefaults] synchronize];
+    [self changeTab];
 }
 - (void)append:(NSString *)s {
     self.output.text = [self.output.text stringByAppendingFormat:@"\n%@\n", s ?: @""];
@@ -181,6 +189,14 @@
 - (void)send {
     NSInteger t = self.tabs.selectedSegmentIndex;
     NSString *text = self.input.text ?: @"";
+    if (t == 0) {
+        NSString *s = self.input.text;
+        [self.input resignFirstResponder];
+        self.input.text = @"";
+        if (![s length]) { [self refreshScreen]; return; }
+        [self browserAction:@"type" extras:[NSDictionary dictionaryWithObject:s forKey:@"text"]];
+        return;
+    }
     if (t == 3) {
         NSString *url = self.address.text;
         if (![url length]) url = @"https://example.org";
@@ -207,23 +223,33 @@
          }];
 }
 - (void)newChat {
-    if (self.tabs.selectedSegmentIndex != 0) return;
-    [self api:@"/chat/reset" data:[NSDictionary dictionary]
-         done:^(NSDictionary *j, NSError *e) { self.output.text = @"New chat\n"; }];
+    if (self.tabs.selectedSegmentIndex == 0) [self refreshScreen];
 }
 - (void)browserAction:(NSString *)action extras:(NSDictionary *)extra {
+    NSString *mode = self.tabs.selectedSegmentIndex == 0 ? @"chatgpt" : @"browser";
     NSMutableDictionary *p = [NSMutableDictionary dictionaryWithDictionary:extra];
+    if ([action isEqualToString:@"open"]) action = @"navigate";
+    if ([action isEqualToString:@"enter"]) {
+        action = @"key";
+        [p setObject:@"Enter" forKey:@"key"];
+    }
     [p setObject:action forKey:@"action"];
-    [self api:@"/browser/action" data:p done:^(NSDictionary *j, NSError *e) {
-        if (e) { self.address.text = [e localizedDescription]; return; }
-        self.address.text = [j objectForKey:@"url"];
+    [p setObject:mode forKey:@"mode"];
+    [self api:@"/remote/action" data:p done:^(NSDictionary *j, NSError *e) {
+        if (e) { [self append:[e localizedDescription]]; return; }
+        if (self.tabs.selectedSegmentIndex == 3 && [j objectForKey:@"url"])
+            self.address.text = [j objectForKey:@"url"];
         [self refreshScreen];
     }];
 }
 - (void)refreshScreen {
+    if (![self.token length]) return;
+    NSString *mode = self.tabs.selectedSegmentIndex == 0 ? @"chatgpt" : @"browser";
+    NSString *path = [NSString stringWithFormat:@"/remote/frame?mode=%@&quality=45", mode];
     NSMutableURLRequest *r = [NSMutableURLRequest requestWithURL:
-                             [NSURL URLWithString:[self.base stringByAppendingString:@"/browser/screen"]]];
+                             [NSURL URLWithString:[self.base stringByAppendingString:path]]];
     [r setValue:self.token forHTTPHeaderField:@"X-Igpt-Token"];
+    [r setTimeoutInterval:45];
     [r setCachePolicy:NSURLRequestReloadIgnoringLocalCacheData];
     [NSURLConnection sendAsynchronousRequest:r queue:[NSOperationQueue mainQueue]
         completionHandler:^(NSURLResponse *resp, NSData *data, NSError *error) {
@@ -235,7 +261,7 @@
     CGPoint p = [tap locationInView:self.screen];
     if (self.screen.bounds.size.width < 1 || self.screen.bounds.size.height < 1) return;
     int x = (int)(1024.0 * p.x / self.screen.bounds.size.width);
-    int y = (int)(640.0 * p.y / self.screen.bounds.size.height);
+    int y = (int)(700.0 * p.y / self.screen.bounds.size.height);
     [self browserAction:@"click" extras:[NSDictionary dictionaryWithObjectsAndKeys:
         [NSNumber numberWithInt:x],@"x",[NSNumber numberWithInt:y],@"y",nil]];
 }
@@ -248,8 +274,8 @@
 - (void)goEnter {
     if ([self.input.text length]) {
         NSString *s = self.input.text; self.input.text = @"";
-        [self api:@"/browser/action" data:[NSDictionary dictionaryWithObjectsAndKeys:
-          @"type",@"action",s,@"text",nil]
+        [self api:@"/remote/action" data:[NSDictionary dictionaryWithObjectsAndKeys:
+          @"type",@"action",s,@"text",self.tabs.selectedSegmentIndex == 0 ? @"chatgpt" : @"browser",@"mode",nil]
          done:^(NSDictionary *j, NSError *e) { [self browserAction:@"enter" extras:[NSDictionary dictionary]]; }];
     } else {
         [self browserAction:@"enter" extras:[NSDictionary dictionary]];

@@ -6,8 +6,7 @@ include $(THEOS)/makefiles/common.mk
 APPLICATION_NAME = Igpt
 Igpt_FILES = main.m
 Igpt_FRAMEWORKS = UIKit QuartzCore MediaPlayer
-Igpt_RESOURCE_FILES = Resources/Info.plist
 Igpt_INSTALL_PATH = /Applications
-Igpt_CFLAGS = -fno-objc-arc
+Igpt_CFLAGS = -fno-objc-arc -fblocks
 
 include $(THEOS_MAKE_PATH)/application.mk

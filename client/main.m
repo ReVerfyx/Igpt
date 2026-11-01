@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <MediaPlayer/MediaPlayer.h>
+#import <QuartzCore/QuartzCore.h>
 
 @interface IGPTViewController : UIViewController <UIAlertViewDelegate, UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate>
 @property (nonatomic, retain) UISegmentedControl *tabs;
@@ -32,8 +33,10 @@
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor colorWithWhite:0.94 alpha:1];
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    self.base = [d stringForKey:@"base"] ?: @"https://2.26.85.86";
-    self.token = [d stringForKey:@"token"] ?: @"";
+    self.base = [d stringForKey:@"base"] ?: @"";
+    // Never restore SSH passwords or bridge secrets from unencrypted preferences.
+    [d removeObjectForKey:@"token"];
+    self.token = @"";
     self.tabs = [[[UISegmentedControl alloc] initWithItems:
                   [NSArray arrayWithObjects:@"ChatGPT",@"Codex",@"VPS",@"Browser",@"Video",nil]] autorelease];
     self.tabs.segmentedControlStyle = UISegmentedControlStyleBar;
@@ -77,6 +80,11 @@
     [self button:@"New chat" action:@selector(newChat)].tag = 101;
     [self changeTab];
 }
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    // Prompt for the bridge access token at each launch; do not persist it.
+    if (![self.token length] && !self.presentedViewController) [self settings];
+}
 - (BOOL)shouldAutorotateToInterfaceOrientation:(UIInterfaceOrientation)orientation {
     return YES;
 }
@@ -115,12 +123,12 @@
 }
 - (void)settings {
     UIAlertView *a = [[[UIAlertView alloc] initWithTitle:@"iGPT connection"
-             message:@"HTTPS base URL and secret from VPS setup"
+             message:@"VPS HTTPS domain and iGPT access token. NOT the SSH/root password."
              delegate:self cancelButtonTitle:@"Cancel" otherButtonTitles:@"Save",nil] autorelease];
     a.alertViewStyle = UIAlertViewStyleLoginAndPasswordInput;
     UITextField *u = [a textFieldAtIndex:0]; u.placeholder = @"https://your-domain";
     u.text = self.base; u.autocorrectionType = UITextAutocorrectionTypeNo; u.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    UITextField *p = [a textFieldAtIndex:1]; p.placeholder = @"IGPT_TOKEN"; p.text = self.token;
+    UITextField *p = [a textFieldAtIndex:1]; p.placeholder = @"Bridge token (not root password)"; p.text = @"";
     a.tag = 900;
     [a show];
 }
@@ -135,7 +143,6 @@
     self.base = [url stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]];
     self.token = key;
     [[NSUserDefaults standardUserDefaults] setObject:self.base forKey:@"base"];
-    [[NSUserDefaults standardUserDefaults] setObject:self.token forKey:@"token"];
     [[NSUserDefaults standardUserDefaults] synchronize];
 }
 - (void)append:(NSString *)s {

@@ -19,18 +19,17 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 TOKEN = os.environ.get("IGPT_TOKEN", "")
-API_KEY = os.environ.get("OPENAI_API_KEY", "")
-MODEL = os.environ.get("IGPT_MODEL", "gpt-5-mini")
 WORKDIR = os.environ.get("IGPT_WORKDIR", "/var/lib/igpt/workspace")
 PUBLIC_URL = os.environ.get("IGPT_PUBLIC_URL", "").rstrip("/")
-INVIDIOUS = os.environ.get("IGPT_INVIDIOUS", "https://inv.nadeko.net").rstrip("/")
+# Comma separated, self-hosted instances are preferred.  A single public
+# instance is deliberately not a mandatory dependency.
+INVIDIOUS_INSTANCES = [x.rstrip("/") for x in os.environ.get(
+    "IGPT_INVIDIOUS_INSTANCES", "https://yewtu.be,https://inv.nadeko.net"
+).split(",") if x.strip()]
 if len(TOKEN) < 32:
     raise RuntimeError("Set IGPT_TOKEN to a random 32+ character secret.")
 os.makedirs(WORKDIR, exist_ok=True)
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-history = []
-browser_lock = asyncio.Lock()
-pw = browser = page = None
 
 
 class Payload(BaseModel):
@@ -57,47 +56,6 @@ async def check_auth(req: Request, next_call):
 @app.get("/health")
 async def health():
     return {"ok": True, "name": "iGPT bridge"}
-
-
-@app.post("/chat/reset")
-async def reset():
-    history.clear()
-    return {"ok": True}
-
-
-@app.post("/chat")
-async def chat(p: Payload):
-    if not API_KEY:
-        raise HTTPException(503, "OPENAI_API_KEY is not configured on the VPS")
-    if not p.text.strip():
-        raise HTTPException(400, "Empty message")
-    user_text = p.text[:4000]
-    messages = (history[-14:] + [{"role": "user", "content": user_text}])
-    async with httpx.AsyncClient(timeout=100) as client:
-        try:
-            r = await client.post(
-                "https://api.openai.com/v1/responses",
-                headers={"Authorization": "Bearer " + API_KEY},
-                json={"model": MODEL, "input": messages, "max_output_tokens": 900},
-            )
-            r.raise_for_status()
-            data = r.json()
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(502, "OpenAI API: HTTP " + str(e.response.status_code))
-        except httpx.HTTPError as e:
-            raise HTTPException(502, "OpenAI connection error: " + str(e))
-    answer = "\n".join(
-        c.get("text", "") for item in data.get("output", [])
-        if item.get("type") == "message"
-        for c in item.get("content", [])
-        if c.get("type") == "output_text"
-    ).strip()
-    if not answer:
-        raise HTTPException(502, "No text in model response")
-    history.extend(({"role": "user", "content": user_text},
-                    {"role": "assistant", "content": answer}))
-    del history[:-20]
-    return {"text": answer}
 
 
 def execute(argv, seconds):
@@ -147,89 +105,45 @@ def validate_url(url):
             raise HTTPException(403, "Private or local addresses blocked")
 
 
-async def ensure_browser():
-    global pw, browser, page
-    if page is None:
-        try:
-            from playwright.async_api import async_playwright
-            pw = await async_playwright().start()
-            browser = await pw.chromium.launch(headless=True,
-                                                args=[])
-            page = await browser.new_page(viewport={"width": 1024, "height": 640},
-                                          device_scale_factor=1)
-        except Exception as e:
-            page = None
-            raise HTTPException(503, "Chromium not ready: " + str(e))
-
-
-@app.post("/browser/action")
-async def browser_action(p: Payload):
-    async with browser_lock:
-        await ensure_browser()
-        try:
-            if p.action == "open":
-                url = p.url.strip()
-                if "://" not in url:
-                    url = "https://" + url
-                await asyncio.to_thread(validate_url, url)
-                await page.goto(url, wait_until="domcontentloaded", timeout=25000)
-            elif p.action == "click":
-                await page.mouse.click(max(0, min(1023, p.x)), max(0, min(639, p.y)))
-            elif p.action == "type":
-                await page.keyboard.insert_text(p.text[:2000])
-            elif p.action == "enter":
-                await page.keyboard.press("Enter")
-            elif p.action == "scroll":
-                await page.mouse.wheel(0, max(-1200, min(1200, p.delta)))
-            elif p.action == "back":
-                await page.go_back(wait_until="domcontentloaded", timeout=20000)
-            else:
-                raise HTTPException(400, "Unknown action")
-            return {"url": page.url}
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(502, str(e)[:300])
-
-
-@app.get("/browser/screen")
-async def browser_screen():
-    async with browser_lock:
-        await ensure_browser()
-        data = await page.screenshot(type="jpeg", quality=55)
-        return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
-
-
 @app.post("/video/search")
 async def video_search(p: Payload):
-    async with httpx.AsyncClient(timeout=15) as client:
-        try:
-            r = await client.get(INVIDIOUS + "/api/v1/search",
-                                 params={"q": p.text[:120], "type": "video"})
-            r.raise_for_status()
-            items = r.json()
-            return {"items": [{"title": x.get("title", "")[:150],
-                                "id": x.get("videoId", "")} for x in items[:15]
-                               if x.get("videoId")]}
-        except Exception:
-            raise HTTPException(502, "Video search backend unavailable")
+    if not p.text.strip():
+        raise HTTPException(400, "Empty search")
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        for instance in INVIDIOUS_INSTANCES:
+            try:
+                r = await client.get(instance + "/api/v1/search",
+                                     params={"q": p.text[:120], "type": "video"})
+                r.raise_for_status()
+                items = r.json()
+                return {"items": [{"title": x.get("title", "")[:150],
+                                   "id": x.get("videoId", ""),
+                                   "thumb": x.get("videoThumbnails", [{}])[0].get("url", "")}
+                                  for x in items[:15] if x.get("videoId")]}
+            except (httpx.HTTPError, ValueError, KeyError):
+                continue
+    raise HTTPException(502, "No configured video backend is available")
 
 
 async def stream_info(video_id):
     if len(video_id) != 11 or not all(c.isalnum() or c in "-_" for c in video_id):
         raise HTTPException(400, "Bad video id")
-    async with httpx.AsyncClient(timeout=15) as client:
-        try:
-            r = await client.get(INVIDIOUS + "/api/v1/videos/" + video_id)
-            r.raise_for_status()
-            streams = r.json().get("formatStreams", [])
-        except Exception:
-            raise HTTPException(502, "Invidious video metadata failed")
-    candidates = [s for s in streams if "video/mp4" in s.get("type", "")]
-    if not candidates:
-        raise HTTPException(404, "No compatible MP4 format")
-    return next((s.get("url") for s in candidates if "360" in s.get("qualityLabel", "")),
-                candidates[0].get("url"))
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        for instance in INVIDIOUS_INSTANCES:
+            try:
+                r = await client.get(instance + "/api/v1/videos/" + video_id)
+                r.raise_for_status()
+                streams = r.json().get("formatStreams", [])
+                candidates = [s for s in streams if "video/mp4" in s.get("type", "") and s.get("url")]
+                # iPad 1 decodes baseline/main H.264 best at 360p.  The source
+                # is still proxied through this service; conversion is handled
+                # by a local source deployment when no compatible stream exists.
+                if candidates:
+                    return next((s["url"] for s in candidates if "360" in s.get("qualityLabel", "")),
+                                candidates[0]["url"])
+            except (httpx.HTTPError, ValueError, KeyError):
+                continue
+    raise HTTPException(404, "No compatible MP4 stream from configured backends")
 
 
 def video_signature(video_id, exp):
@@ -279,5 +193,9 @@ async def video_stream(video_id: str, request: Request, exp: int = 0, sig: str =
 
 
 # iOS 5 remote display sessions (separate persistent ChatGPT and browser profiles).
-from remote import router as remote_router
+from remote import router as remote_router, close as close_remote
 app.include_router(remote_router)
+
+@app.on_event("shutdown")
+async def shutdown_remote():
+    await close_remote()

@@ -21,7 +21,31 @@ contexts = {}
 pages = {}
 locks = {"chatgpt": asyncio.Lock(), "browser": asyncio.Lock()}
 _playwright = None
+_browser = None
 _cache = {}
+
+async def close():
+    """Release Chromium cleanly so profile state and RAM are not leaked."""
+    global _browser, _playwright
+    for context in list(contexts.values()):
+        try:
+            await context.close()
+        except Exception:
+            pass
+    contexts.clear()
+    pages.clear()
+    if _browser is not None:
+        try:
+            await _browser.close()
+        except Exception:
+            pass
+        _browser = None
+    if _playwright is not None:
+        try:
+            await _playwright.stop()
+        except Exception:
+            pass
+        _playwright = None
 
 class Command(BaseModel):
     mode: str = "chatgpt"
@@ -81,7 +105,7 @@ async def network_guard(route):
         await route.abort()
 
 async def ensure(mode):
-    global _playwright
+    global _playwright, _browser
     check_mode(mode)
     if mode in pages and not pages[mode].is_closed():
         return pages[mode]
@@ -89,12 +113,18 @@ async def ensure(mode):
         from playwright.async_api import async_playwright
         if _playwright is None:
             _playwright = await async_playwright().start()
+        # One Chromium process hosts both isolated contexts.  Cookies are saved
+        # to separate state files after every operation, avoiding one Chromium
+        # per panel while preserving the ChatGPT/browser login separation.
+        if _browser is None or not _browser.is_connected():
+            headless = os.environ.get("IGPT_HEADLESS", "1") != "0"
+            _browser = await _playwright.chromium.launch(headless=headless)
         user_dir = PROFILE_ROOT / mode
         user_dir.mkdir(exist_ok=True, mode=0o700)
         os.chmod(user_dir, 0o700)
-        context = await _playwright.chromium.launch_persistent_context(
-            str(user_dir),
-            headless=True,
+        state = user_dir / "storage-state.json"
+        context = await _browser.new_context(
+            storage_state=str(state) if state.exists() else None,
             viewport={"width": WIDTH, "height": HEIGHT},
             device_scale_factor=1,
             locale="ru-RU",
@@ -128,6 +158,7 @@ async def open_mode(p: Command):
                 url = checked_url(p.url)
                 await asyncio.to_thread(resolve_public_host, urlsplit(url).hostname)
                 await page.goto(url, wait_until="domcontentloaded", timeout=35000)
+            await contexts[p.mode].storage_state(path=str(PROFILE_ROOT / p.mode / "storage-state.json"))
             return {"mode": p.mode, "url": page.url, "viewport": [WIDTH, HEIGHT]}
         except Exception as exc:
             raise HTTPException(502, "Navigation error: " + str(exc)[:240])
@@ -163,6 +194,7 @@ async def interact(p: Command):
                 url = checked_url(p.url)
                 await asyncio.to_thread(resolve_public_host, urlsplit(url).hostname)
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await contexts[p.mode].storage_state(path=str(PROFILE_ROOT / p.mode / "storage-state.json"))
             return {"mode": p.mode, "url": page.url}
         except HTTPException:
             raise

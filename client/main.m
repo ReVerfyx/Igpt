@@ -114,7 +114,6 @@
     self.address.hidden = (t != 3);
     self.backButton.hidden = self.upButton.hidden = self.downButton.hidden = self.enterButton.hidden = (t != 0 && t != 3);
     self.input.text = @"";
-    self.sendButton.titleLabel.textAlignment = UITextAlignmentCenter;
     [self.sendButton setTitle:(t == 3 ? @"Open" : t == 4 ? @"Search" : @"Send") forState:UIControlStateNormal];
     if (t == 0) self.output.text = @"ChatGPT account · remote login\n";
     if (t == 1) self.output.text = @"Codex · run prompts on VPS workspace\n";
@@ -143,14 +142,16 @@
     if (a.tag != 900 || idx != 1) return;
     NSString *url = [[a textFieldAtIndex:0] text];
     NSString *key = [[a textFieldAtIndex:1] text];
-    if (![url hasPrefix:@"https://"] || ![key length]) {
-        self.output.text = @"Use an HTTPS domain and server token.";
+    if (!([url hasPrefix:@"https://"] || [url hasPrefix:@"http://"]) || ![key length]) {
+        self.output.text = @"Укажите адрес HTTP(S) и токен сервера.";
         return;
     }
     self.base = [url stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"/"]];
     self.token = key;
     [[NSUserDefaults standardUserDefaults] setObject:self.base forKey:@"base"];
     [[NSUserDefaults standardUserDefaults] synchronize];
+    if ([self.base hasPrefix:@"http://"])
+        self.output.text = @"ТЕСТОВЫЙ HTTP: трафик и токен не шифруются. Не вводите пароль root или ChatGPT вне удалённого экрана.";
     [self changeTab];
 }
 - (void)append:(NSString *)s {
@@ -160,8 +161,8 @@
     [self.output scrollRangeToVisible:NSMakeRange([self.output.text length],0)];
 }
 - (void)api:(NSString *)path data:(NSDictionary *)body done:(void (^)(NSDictionary *, NSError *))done {
-    if (![self.base hasPrefix:@"https://"] || ![self.token length]) {
-        [self append:@"Set HTTPS address and token in Settings"];
+    if (!([self.base hasPrefix:@"https://"] || [self.base hasPrefix:@"http://"]) || ![self.token length]) {
+        [self append:@"Укажите адрес HTTP(S) и токен в настройках"];
         return;
     }
     NSURL *u = [NSURL URLWithString:[self.base stringByAppendingString:path]];
